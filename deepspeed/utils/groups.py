@@ -17,6 +17,8 @@ Copyright 2021 The Microsoft DeepSpeed Team
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import logging
+
 """
 Support, expert, data, and model (only megatron-style) parallelism in DeepSpeed
 
@@ -68,7 +70,7 @@ def ensure_divisibility(numerator, denominator):
         numerator, denominator)
 
 
-def initialize(ep_size=1, mpu=None):
+def initialize(ep_size=1, mpu=None, has_moe_layers=False):
     """
     Process groups initialization supporting expert (E), data (D), and model (M) parallelism. DeepSpeed considers
     the following scenarios w.r.t. process group creation.
@@ -103,13 +105,21 @@ def initialize(ep_size=1, mpu=None):
             that descibes model/data parallel ranks.
 
     """
-    if mpu is not None:
-        log_dist(message="initializing deepspeed groups using mpu", ranks=[0])
-        initialize_model_and_expert_parallel(ep_size, mpu)
+    if has_moe_layers:
+        if mpu is not None:
+            log_dist(message="initializing deepspeed groups using mpu", ranks=[0])
+            initialize_model_and_expert_parallel(ep_size, mpu)
+        else:
+            log_dist(message="initializing deepspeed groups", ranks=[0])
+            initialize_model_parallel(1)
+            initialize_expert_parallel(ep_size)
     else:
-        log_dist(message="initializing deepspeed groups", ranks=[0])
-        initialize_model_parallel(1)
-        initialize_expert_parallel(ep_size)
+        if mpu is not None:
+            log_dist(message="initializing data and model parallel groups using mpu", ranks=[0])
+            initialize_data_and_model_parallel(mpu)
+        else:
+            log_dist(message="initializing deepspeed groups", ranks=[0])
+            initialize_model_parallel(1)
 
 
 def initialize_model_parallel(model_parallel_size_):
@@ -216,6 +226,35 @@ def initialize_expert_parallel(expert_parallel_size_):
             _EXPERT_PARALLEL_GROUP = group
 
 
+def initialize_data_and_model_parallel(mpu):
+    """
+    * S3: There is model parallelism but no expert parallelism (M)::
+
+        mpu.init() # client initializes its model parallel unit
+        model = my_model(args)
+        engine = deepspeed.initialize(model, mpu=mpu) # init w. mpu but ep_size = dp_world_size
+    """
+    assert torch.distributed.is_initialized(), "torch distributed is not initialized"
+    assert mpu.model_parallel_is_initialized(), "model parallel group is not initialized"
+    model_parallel_size_ = mpu.get_model_parallel_world_size()
+
+    world_size = torch.distributed.get_world_size()
+    rank = torch.distributed.get_rank()
+    dp_world_size = mpu.get_data_parallel_world_size()
+    dp_rank = mpu.get_data_parallel_rank()
+
+    log_dist(
+        f"Initializing deepspeed groups with model parallel size {model_parallel_size_}, expert parallel size {expert_parallel_size_}, and data parallel size {world_size}",
+        [0])
+
+    global _DATA_PARALLEL_GROUP, _MODEL_PARALLEL_GROUP
+    global _EXPERT_PARALLEL_GROUP, _EXPERT_DATA_PARALLEL_GROUP
+
+    # Get world size and rank. Ensure some consistencies.
+    _DATA_PARALLEL_GROUP = mpu.get_data_parallel_group()
+    _MODEL_PARALLEL_GROUP = mpu.get_model_parallel_group()
+
+
 def initialize_model_and_expert_parallel(expert_parallel_size_, mpu):
     """
         Initialize Expert groups based on MPU groups.
@@ -251,6 +290,7 @@ def initialize_model_and_expert_parallel(expert_parallel_size_, mpu):
 
     expert_parallel_size_ = min(expert_parallel_size_, dp_world_size)
     ensure_divisibility(world_size, expert_parallel_size_)
+    logging.info("expert_parallel_size_ = {}".format(expert_parallel_size_))
 
     # Build the expert data parallel groups.
     assert _EXPERT_DATA_PARALLEL_GROUP is None, \
@@ -272,6 +312,7 @@ def initialize_model_and_expert_parallel(expert_parallel_size_, mpu):
                 [0])
             if rank in list(ranks):
                 _EXPERT_DATA_PARALLEL_GROUP = group
+            logging.info("create expert data parallel process group. MP {}, EP {}, Ranks = {}".format(j, i, ranks))
 
         for i in range(dp_world_size // expert_parallel_size_):
             ranks = range(i * expert_parallel_size_ * model_parallel_size_ + j,
@@ -284,6 +325,7 @@ def initialize_model_and_expert_parallel(expert_parallel_size_, mpu):
                      [0])
             if rank in list(ranks):
                 _EXPERT_PARALLEL_GROUP = group
+            logging.info("creating expert parallel process group. MP {}, EP {}, Ranks = {}".format(j, i, ranks))
 
 
 def is_initialized():
