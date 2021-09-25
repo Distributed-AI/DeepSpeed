@@ -122,7 +122,10 @@ def main():
             sys.executable,
             "-u",
             args.training_script,
-            "--local_rank={}".format(local_rank)
+            "--local_rank={}".format(local_rank),
+            "--nnodes={}".format(args.nnodes),
+            "--num_local_procs={}".format(num_local_procs),
+            "--node_rank={}".format(args.node_rank),
         ] + args.training_script_args
 
         sig_names = {2: "SIGINT", 15: "SIGTERM"}
