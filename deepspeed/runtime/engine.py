@@ -138,6 +138,7 @@ class DeepSpeedEngine(Module):
         self.block_eigenvalue = None
         self.gas_boundary_ctr = 0
         self.dist_backend = "nccl"
+        self.excluded_weights_for_ddp_sync = set()
         self.has_moe_layers = False
         self.num_experts = None
 
@@ -245,6 +246,9 @@ class DeepSpeedEngine(Module):
         util_ops = UtilsBuilder().load()
         self.flatten = util_ops.flatten
         self.unflatten = util_ops.unflatten
+
+        if mpu is not None and hasattr(mpu, "get_excluded_weights_for_ddp_sync"):
+            self.excluded_weights_for_ddp_sync = mpu.get_excluded_weights_for_ddp_sync(model)
 
     def get_batch_info(self):
         """ Get all training batch related settings.
@@ -1687,17 +1691,19 @@ class DeepSpeedEngine(Module):
                     grads.append(param.grad.data)
             else:
                 grad_data = param.grad.data
-                if self.sparse_gradients_enabled(
-                ) and param_name in self.csr_tensor_module_names:
-                    if is_moe_param:
-                        expert_grads.append(CSRTensor(grad_data))
+                if not self.excluded_weights_for_ddp_sync.__contains__(param_name):
+                    grads.append(grad_data)
+                    if self.sparse_gradients_enabled(
+                    ) and param_name in self.csr_tensor_module_names:
+                        if is_moe_param:
+                            expert_grads.append(CSRTensor(grad_data))
+                        else:
+                            grads.append(CSRTensor(grad_data))
                     else:
-                        grads.append(CSRTensor(grad_data))
-                else:
-                    if is_moe_param:
-                        expert_grads.append(grad_data)
-                    else:
-                        grads.append(grad_data)
+                        if is_moe_param:
+                            expert_grads.append(grad_data)
+                        else:
+                            grads.append(grad_data)
 
         split_buckets = split_half_float_double_csr(grads)
         for i, bucket_tuple in enumerate(split_buckets):
