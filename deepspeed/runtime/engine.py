@@ -138,7 +138,6 @@ class DeepSpeedEngine(Module):
         self.block_eigenvalue = None
         self.gas_boundary_ctr = 0
         self.dist_backend = "nccl"
-        self.excluded_weights_for_ddp_sync = set()
         self.has_moe_layers = False
         self.num_experts = None
 
@@ -247,8 +246,7 @@ class DeepSpeedEngine(Module):
         self.flatten = util_ops.flatten
         self.unflatten = util_ops.unflatten
 
-        if mpu is not None and hasattr(mpu, "get_excluded_weights_for_ddp_sync"):
-            self.excluded_weights_for_ddp_sync = mpu.get_excluded_weights_for_ddp_sync(model)
+        self.excluded_weights_for_ddp_sync = set()
 
     def get_batch_info(self):
         """ Get all training batch related settings.
@@ -754,7 +752,7 @@ class DeepSpeedEngine(Module):
             else:
                 if not groups.is_initialized():
                     # Scenario 1
-                    groups.initialize(self.has_moe_layers)
+                    groups.initialize(self.has_moe_layers, has_moe_layers=self.has_moe_layers)
                 #else:
                 # Scenario 2
                 # Scenario 4 - Case 2
@@ -1669,6 +1667,10 @@ class DeepSpeedEngine(Module):
         if len(small_bucket) > 0:
             self.allreduce_and_copy(small_bucket, dp_group)
 
+    def add_excluded_weights_for_ddp_sync(self, params_name):
+        logger.info("add_excluded_weights_for_ddp_sync: {}".format(params_name))
+        self.excluded_weights_for_ddp_sync.add(params_name)
+
     def buffered_allreduce_fallback(self, grads=None, elements_per_buffer=500000000):
         grads, expert_grads = [], []
         for param_name, param in self.module.named_parameters():
@@ -1704,6 +1706,8 @@ class DeepSpeedEngine(Module):
                             expert_grads.append(grad_data)
                         else:
                             grads.append(grad_data)
+                else:
+                    logger.info("weights {} are excluded from DDP sync".format(param_name))
 
         split_buckets = split_half_float_double_csr(grads)
         for i, bucket_tuple in enumerate(split_buckets):
