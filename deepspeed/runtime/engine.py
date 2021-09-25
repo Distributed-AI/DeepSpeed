@@ -750,7 +750,7 @@ class DeepSpeedEngine(Module):
                     assert self.mpu.get_model_parallel_world_size() == groups.get_model_parallel_world_size(), "mpu object provided must match mpu object provided to groups.initialize()"
                 else:
                     # Scenario 3
-                    groups.initialize(mpu=self.mpu, self.has_moe_layers)
+                    groups.initialize(mpu=self.mpu, has_moe_layers=self.has_moe_layers)
             else:
                 if not groups.is_initialized():
                     # Scenario 1
