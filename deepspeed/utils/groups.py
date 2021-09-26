@@ -244,7 +244,7 @@ def initialize_data_and_model_parallel(mpu):
     dp_rank = mpu.get_data_parallel_rank()
 
     log_dist(
-        f"Initializing deepspeed groups with model parallel size {model_parallel_size_}, expert parallel size {expert_parallel_size_}, and data parallel size {world_size}",
+        f"Initializing deepspeed groups with model parallel size {model_parallel_size_}, and data parallel size {world_size}",
         [0])
 
     global _DATA_PARALLEL_GROUP, _MODEL_PARALLEL_GROUP
