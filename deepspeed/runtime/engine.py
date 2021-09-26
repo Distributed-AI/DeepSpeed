@@ -246,8 +246,6 @@ class DeepSpeedEngine(Module):
         self.flatten = util_ops.flatten
         self.unflatten = util_ops.unflatten
 
-        self.excluded_weights_for_ddp_sync = set()
-
     def get_batch_info(self):
         """ Get all training batch related settings.
 
@@ -1297,7 +1295,6 @@ class DeepSpeedEngine(Module):
         # Pass (PP) gas boundary flag to optimizer (required for zero)
         self.optimizer.is_gradient_accumulation_boundary = self.is_gradient_accumulation_boundary(
         )
-
         # ZeRO stage 2 communicates during non gradient accumulation boundaries as well
         if self.zero_optimization_partition_gradients():
             self.optimizer.overlapping_partition_gradients_reduce_epilogue()
@@ -1667,13 +1664,14 @@ class DeepSpeedEngine(Module):
         if len(small_bucket) > 0:
             self.allreduce_and_copy(small_bucket, dp_group)
 
-    def add_excluded_weights_for_ddp_sync(self, params_name):
-        logger.info("add_excluded_weights_for_ddp_sync: {}".format(params_name))
-        self.excluded_weights_for_ddp_sync.add(params_name)
-
     def buffered_allreduce_fallback(self, grads=None, elements_per_buffer=500000000):
         grads, expert_grads = [], []
         for param_name, param in self.module.named_parameters():
+            # if hasattr(param, 'expert'):
+            if 'expert' in param_name:
+                # Skip gradient sync for unshared parameters
+                logger.info("Skip param_name {}'s gradient sync for unshared parameters".format(param_name))
+                continue
             if hasattr(param, 'allreduce') and not param.allreduce:
                 is_moe_param = True
             else:
@@ -1693,21 +1691,18 @@ class DeepSpeedEngine(Module):
                     grads.append(param.grad.data)
             else:
                 grad_data = param.grad.data
-                if not self.excluded_weights_for_ddp_sync.__contains__(param_name):
-                    grads.append(grad_data)
-                    if self.sparse_gradients_enabled(
-                    ) and param_name in self.csr_tensor_module_names:
-                        if is_moe_param:
-                            expert_grads.append(CSRTensor(grad_data))
-                        else:
-                            grads.append(CSRTensor(grad_data))
+                grads.append(grad_data)
+                if self.sparse_gradients_enabled(
+                ) and param_name in self.csr_tensor_module_names:
+                    if is_moe_param:
+                        expert_grads.append(CSRTensor(grad_data))
                     else:
-                        if is_moe_param:
-                            expert_grads.append(grad_data)
-                        else:
-                            grads.append(grad_data)
+                        grads.append(CSRTensor(grad_data))
                 else:
-                    logger.info("weights {} are excluded from DDP sync".format(param_name))
+                    if is_moe_param:
+                        expert_grads.append(grad_data)
+                    else:
+                        grads.append(grad_data)
 
         split_buckets = split_half_float_double_csr(grads)
         for i, bucket_tuple in enumerate(split_buckets):
